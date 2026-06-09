@@ -36,6 +36,13 @@ into the live system.
 - `POST /legacy_individual/import_pssn/` — multipart upload of the two PSSN
   CSVs (`household_file`, `member_file`)
 
+## Upload size note
+
+- The legacy PSSN import posts both CSV files in one multipart request.
+- Set `DATA_UPLOAD_MAX_MEMORY_SIZE` high enough for the combined request body.
+- In this stack, `64 MB` (`67108864`) is a practical baseline for the cleaned
+  paired files currently under test.
+
 ## Services
 
 - `LegacyImportBatchService` — create batch, persist files, trigger

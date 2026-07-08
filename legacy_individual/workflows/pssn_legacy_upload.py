@@ -27,6 +27,10 @@ from core.utils import set_current_user, clear_current_user
 from location.models import HealthFacility, Location
 
 from legacy_individual.apps import LegacyIndividualConfig
+from legacy_individual.columns import (
+    _HOUSEHOLD_KNOWN_COLUMNS,
+    _MEMBER_KNOWN_COLUMNS,
+)
 from legacy_individual.models import (
     LegacyGroup,
     LegacyGroupIndividual,
@@ -45,14 +49,9 @@ REQUIRED_HOUSEHOLD_COLUMNS = {'REGISTRATIONNO'}
 REQUIRED_MEMBER_COLUMNS = {'REGISTRATIONNO', 'MEMBERLINENO'}
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
-
 def process_legacy_pssn_upload(user_uuid: str, batch_uuid: str) -> None:
     """
-    Run the full paired-upload pipeline for one batch.
+    Run the full paired-upload pipeline for one CSV batch.
 
     Idempotent on retry: re-running on a failed batch will create duplicate
     rows; callers should reset the batch first if they want to re-import.
@@ -79,47 +78,56 @@ def process_legacy_pssn_upload(user_uuid: str, batch_uuid: str) -> None:
             logger.exception('Legacy PSSN upload — read failure')
             return
 
-        # Header validation
-        missing_household = REQUIRED_HOUSEHOLD_COLUMNS - set(household_df.columns)
-        missing_member = REQUIRED_MEMBER_COLUMNS - set(member_df.columns)
-        if missing_household or missing_member:
-            service.fail(
-                batch,
-                'Required columns missing',
-                {
-                    'household_missing': sorted(missing_household),
-                    'member_missing': sorted(missing_member),
-                },
-            )
-            return
-
-        service.mark_in_progress(batch)
-
-        try:
-            with transaction.atomic():
-                stats = _import_paired(batch, household_df, member_df, user)
-        except Exception as exc:
-            logger.exception('Legacy PSSN upload — fatal during import')
-            service.fail(batch, 'Fatal error during import', {'error': str(exc)})
-            return
-
-        service.finalize(
-            batch,
-            total_households=stats['total_households'],
-            total_members=stats['total_members'],
-            success_household_count=stats['success_household_count'],
-            success_member_count=stats['success_member_count'],
-            warning_count=stats['warning_count'],
-            error_count=stats['error_count'],
-            errors={'errors': stats['errors']} if stats['errors'] else {},
-        )
+        process_legacy_pssn_frames(user, batch, household_df, member_df, service=service)
     finally:
         clear_current_user()
 
 
-# ---------------------------------------------------------------------------
-# Internal: paired-pass import
-# ---------------------------------------------------------------------------
+def process_legacy_pssn_frames(
+    user,
+    batch: LegacyImportBatch,
+    household_df: pd.DataFrame,
+    member_df: pd.DataFrame,
+    *,
+    service: Optional[LegacyImportBatchService] = None,
+) -> Optional[Dict]:
+    """Import a pre-loaded pair of PSSN frames. See docs/LEGACY_API_ETL_CODE_RATIONALE.md."""
+    service = service or LegacyImportBatchService(user)
+
+    missing_household = REQUIRED_HOUSEHOLD_COLUMNS - set(household_df.columns)
+    missing_member = REQUIRED_MEMBER_COLUMNS - set(member_df.columns)
+    if missing_household or missing_member:
+        service.fail(
+            batch,
+            'Required columns missing',
+            {
+                'household_missing': sorted(missing_household),
+                'member_missing': sorted(missing_member),
+            },
+        )
+        return None
+
+    service.mark_in_progress(batch)
+
+    try:
+        with transaction.atomic():
+            stats = _import_paired(batch, household_df, member_df, user)
+    except Exception as exc:
+        logger.exception('Legacy PSSN import — fatal during import')
+        service.fail(batch, 'Fatal error during import', {'error': str(exc)})
+        return None
+
+    service.finalize(
+        batch,
+        total_households=stats['total_households'],
+        total_members=stats['total_members'],
+        success_household_count=stats['success_household_count'],
+        success_member_count=stats['success_member_count'],
+        warning_count=stats['warning_count'],
+        error_count=stats['error_count'],
+        errors={'errors': stats['errors']} if stats['errors'] else {},
+    )
+    return stats
 
 
 def _import_paired(
@@ -131,7 +139,6 @@ def _import_paired(
     errors: Dict[str, list] = {'household_file': [], 'member_file': []}
     warning_count = 0
 
-    # Pass 1 — households -------------------------------------------------
     location_cache = _build_village_cache(household_df)
 
     group_by_registration: Dict[str, LegacyGroup] = {}
@@ -169,7 +176,6 @@ def _import_paired(
         group_by_registration[registration_no] = group
         success_household += 1
 
-    # Pass 2 — members ----------------------------------------------------
     facility_cache = _build_facility_cache(member_df)
     head_phone_by_registration = _extract_head_phones(household_df)
     success_member = 0
@@ -220,7 +226,6 @@ def _import_paired(
         facility_code = PssnNormalizationService.normalize_code(
             row.get('FACILITY_CODE'), 'village'
         ) if row.get('FACILITY_CODE') else None
-        # Facility codes don't follow village width — try raw HFCode match too
         raw_facility_code = (row.get('FACILITY_CODE') or '').strip() or None
         facility = (
             facility_cache.get(raw_facility_code)
@@ -281,11 +286,6 @@ def _import_paired(
         'error_count': sum(len(v) for v in errors.values()),
         'errors': errors,
     }
-
-
-# ---------------------------------------------------------------------------
-# Caches and json_ext builders
-# ---------------------------------------------------------------------------
 
 
 def _build_village_cache(household_df: pd.DataFrame) -> Dict[str, Location]:
@@ -414,7 +414,7 @@ def _build_group_json_ext(
         'form_no': g('FORMNO'),
         'hh_status': g('HHSTATUS'),
         'hh_size': g('HHSIZE'),
-        'pmt_score': g('PMTSCORE'),
+        'pmt_score': PssnNormalizationService.round_decimal(g('PMTSCORE')),
         'hh_classification': g('HHCLASSIFICATION'),
         'phone_no': g('PHONE_NO'),
         'head': {k: v for k, v in head.items() if v},
@@ -424,7 +424,6 @@ def _build_group_json_ext(
         'payment': {k: v for k, v in payment.items() if v},
         'audit': {k: v for k, v in audit.items() if v},
     }
-    # Carry through any unmapped raw columns
     raw = _collect_raw_columns(row, _HOUSEHOLD_KNOWN_COLUMNS)
     if raw:
         out['raw'] = raw
@@ -522,44 +521,3 @@ def _collect_raw_columns(row: pd.Series, known_cols: set) -> Dict:
         if s:
             raw[col] = s
     return raw
-
-
-# Exhaustive lists of columns this workflow knows about explicitly.
-# Anything outside these sets ends up in json_ext.raw.<COLUMN>.
-
-_HOUSEHOLD_KNOWN_COLUMNS = {
-    'REGISTRATIONNO', 'UNIQUENO', 'WAVENO', 'ROUNDNO', 'BATCHNO', 'FORMNO',
-    'REGION_CODE', 'DISTRICT_CODE', 'WARD_CODE', 'VILLAGE_CODE',
-    'URBANORRULAR', 'AREA_CODE', 'SUBVILLAGE', 'POPULAR_AREA',
-    'HH_FIRSTNAME', 'HH_MIDDLENAME', 'HH_LASTNAME',
-    'NO_HH_CHANGE', 'NEW_HH_FIRSTNAME', 'NEW_HH_MIDDLENAME', 'NEW_HH_LASTNAME',
-    'AGE', 'DOB', 'POPULAR_HH_NAME',
-    'HHSTATUS', 'HHSIZE', 'PMTSCORE', 'HHCLASSIFICATION', 'V_STATUS',
-    'PHONE_NO', 'BANK_ACCOUNT',
-    'EPAYMENT_CODE', 'EPAYMENT_APPROACH', 'EPAYMENT_ACCOUNT',
-    'EPAYMENT_BANK_BRANCH', 'EPAYMENT_STATUS', 'EPAYMENT_REGISTERED_NAME',
-    'APR_EPAYMENT_CODE', 'APR_EPAYMENT_ACCOUNT', 'APR_EPAYMENT_BANK_BRANCH',
-    'APR_EPAYMENT_APPROACH', 'APR_EPAYMENT_REGISTERED_NAME',
-    'APRROVED_DATE', 'APPROVED_BY',
-    'ENROLLMENT_DATE', 'SIGNED_REPRESENTATIVE', 'SUPERVISOR_NAME',
-    'SIGNED_BY_SUPERVISOR', 'DATAENTRYID', 'CAPTUREDBY', 'DATECAPTURED',
-    'UPDATEDBY', 'DATEUPDATED', 'APPROVEDBY', 'DATEAPPROVED',
-    'REVIEWED_BY', 'REVIEWED_DATE', 'REMARKS',
-}
-
-_MEMBER_KNOWN_COLUMNS = {
-    'UNIQUENO', 'MEMBERLINENO', 'REGISTRATIONNO', 'REF_UNIQUENO',
-    'FIRSTNAME', 'MIDDLENAME', 'LASTNAME',
-    'NEW_FIRSTNAME', 'NEW_MIDDLENAME', 'NEW_LASTNAME', 'NO_CHANGE',
-    'SEX', 'AGE', 'NEW_AGE', 'GRADE',
-    'DATEOFBIRTH', 'NEW_DATEOFBIRTH',
-    'DISABILITY', 'DISLEVEL', 'DIS_REASON', 'CHRONICALILINESS',
-    'RELATIONSHIPTOHEAD', 'NEW_RELATIONSHIPTOHEAD', 'HH_REP',
-    'NIDA_NIN', 'NIDA_FIRSTNAME', 'NIDA_MIDDLENAME', 'NIDA_LASTNAME',
-    'NIDA_BIRTH_DATE', 'NIDA_EXPIRY_DATE', 'NIDA_STATUS', 'NO_NIDA_REASON',
-    'PREM_NO', 'PREM_STATUS', 'PREM_CODE',
-    'FACILITY_CODE', 'FACILITY_NAME',
-    'SIS_DOB', 'SIS_SEX', 'SIS_SCHOOL_ID', 'SIS_ID', 'SIS_PHOTO',
-    'SIS_SCHOOL_CODE', 'SIS_GRADE', 'SIS_UPDATE_YEAR',
-    'SERVICE_CAT', 'HH_MEMBER_STATUS', 'HH_MEMBER_EXEMPTION', 'V_STATUS',
-}

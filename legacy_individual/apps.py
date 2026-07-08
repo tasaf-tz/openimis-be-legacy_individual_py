@@ -8,8 +8,6 @@ from django.db.models.signals import post_save
 logger = logging.getLogger(__name__)
 
 
-# Permission codes are reserved in the 200xxx block to avoid collisions with
-# the live `individual` module (159xxx) and `social_protection` (180xxx).
 DEFAULT_CONFIG = {
     "gql_legacy_individual_search_perms": ["200001"],
     "gql_legacy_individual_create_perms": ["200002"],
@@ -20,7 +18,6 @@ DEFAULT_CONFIG = {
     "gql_legacy_group_update_perms": ["200013"],
     "gql_legacy_group_delete_perms": ["200014"],
     "gql_legacy_import_execute_perms": ["200021"],
-    # Phase-2 keys (defined but unused in MVP)
     "gql_legacy_match_review_perms": ["200031"],
     "gql_legacy_promotion_execute_perms": ["200041"],
 
@@ -28,7 +25,22 @@ DEFAULT_CONFIG = {
     "legacy_preserve_uploaded_file": True,
     "legacy_resolve_facility_against_tblhf": True,
 
-    # Phase-2 feature flags (off in MVP)
+    # Legacy PSSN API pull — see docs/LEGACY_API_ETL_CODE_RATIONALE.md.
+    "legacy_api_base_url": "",
+    "legacy_api_path": "/livePSSN/api/etlapi/combined_household_members.php",
+    "legacy_api_auth_type": "none",
+    "legacy_api_username": "",
+    "legacy_api_password": "",
+    "legacy_api_bearer_token": "",
+    "legacy_api_connect_timeout": 5,
+    "legacy_api_read_timeout": 60,
+    "legacy_api_retries": 3,
+    "legacy_api_page_size": 1000,
+    "legacy_api_max_pages": 1000,
+    "legacy_api_reimport_strategy": "replace",
+    "legacy_api_preserve_raw_json": True,
+    "legacy_api_use_celery": True,
+
     "enable_legacy_matching": False,
     "enable_legacy_promotion": False,
 }
@@ -55,6 +67,21 @@ class LegacyIndividualConfig(AppConfig):
     legacy_resolve_facility_against_tblhf = None
     enable_legacy_matching = None
     enable_legacy_promotion = None
+
+    legacy_api_base_url = None
+    legacy_api_path = None
+    legacy_api_auth_type = None
+    legacy_api_username = None
+    legacy_api_password = None
+    legacy_api_bearer_token = None
+    legacy_api_connect_timeout = None
+    legacy_api_read_timeout = None
+    legacy_api_retries = None
+    legacy_api_page_size = None
+    legacy_api_max_pages = None
+    legacy_api_reimport_strategy = None
+    legacy_api_preserve_raw_json = None
+    legacy_api_use_celery = None
 
     def ready(self):
         from core.models import ModuleConfiguration

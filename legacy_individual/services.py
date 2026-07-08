@@ -14,12 +14,14 @@ Important: this module never writes to ``individual_individual`` or
 ``individual_group``. All writes target the legacy_individual_* tables.
 """
 
+import json
 import logging
 import os
 import re
 import uuid
 from datetime import date, datetime
-from typing import Optional, Tuple
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Any, Dict, Optional, Tuple
 
 from django.conf import settings
 from django.db import transaction
@@ -42,15 +44,9 @@ _LEGACY_UPLOAD_DIR = os.path.join(
 )
 
 
-# ---------------------------------------------------------------------------
-# Pure helpers
-# ---------------------------------------------------------------------------
-
-
 class PssnNormalizationService:
     """Stateless helpers used by the workflow during file ingestion."""
 
-    # See docs/legacy-individual-module/07_PSSN_COLUMN_MAPPING.md §6
     _CODE_WIDTH_BY_LEVEL = {
         'region': 2,
         'district': 4,
@@ -75,12 +71,24 @@ class PssnNormalizationService:
         s = str(value).strip()
         if not s or s.lower() in ('nan', 'none', 'null'):
             return None
-        # Take the YYYY-MM-DD prefix; ignore any trailing time.
         prefix = s.split(' ')[0].split('T')[0]
         try:
             return datetime.strptime(prefix, '%Y-%m-%d').date()
         except ValueError:
             return None
+
+    @staticmethod
+    def round_decimal(value, places: int = 4) -> Optional[str]:
+        if value is None:
+            return None
+        s = str(value).strip()
+        if not s or s.lower() in ('nan', 'none', 'null'):
+            return None
+        try:
+            q = Decimal(s).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError):
+            return s
+        return format(q.normalize(), 'f')
 
     @staticmethod
     def decode_gender(value) -> Optional[str]:
@@ -94,7 +102,6 @@ class PssnNormalizationService:
             return 'M'
         if s == '2':
             return 'F'
-        # Sometimes upstream already mapped to letters
         if s.upper() in ('M', 'F'):
             return s.upper()
         return None
@@ -123,7 +130,7 @@ class PssnNormalizationService:
         s = str(value).strip()
         if not s or s.lower() in ('nan', 'none', 'null'):
             return None
-        s = s.split('.')[0]  # drop ".0" from Excel-cast floats
+        s = s.split('.')[0]
         s = re.sub(r'[^0-9]', '', s)
         if not s:
             return None
@@ -184,11 +191,6 @@ class PssnNormalizationService:
         if not line:
             return str(registration_no).strip()
         return f"{str(registration_no).strip()}-{line}"
-
-
-# ---------------------------------------------------------------------------
-# Batch lifecycle
-# ---------------------------------------------------------------------------
 
 
 def _ensure_upload_dir():
@@ -301,11 +303,6 @@ class LegacyImportBatchService:
         batch.save(user=self.user)
 
 
-# ---------------------------------------------------------------------------
-# Read helpers (thin — most filtering happens in GraphQL)
-# ---------------------------------------------------------------------------
-
-
 class LegacyIndividualService:
     def __init__(self, user):
         self.user = user
@@ -322,3 +319,203 @@ class LegacyGroupService:
     @staticmethod
     def base_queryset():
         return LegacyGroup.objects.filter(is_deleted=False)
+
+
+class LegacyApiImportService:
+    SOURCE_SYSTEM = 'PSSN_API'
+    _COMPLETED_STATUSES = (
+        LegacyImportBatch.Status.SUCCESS,
+        LegacyImportBatch.Status.COMPLETED_WITH_ERRORS,
+    )
+
+    def __init__(self, user):
+        self.user = user
+
+    def run(
+        self,
+        district_code: str,
+        *,
+        paa_name: Optional[str] = None,
+        region_code: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        from core.utils import clear_current_user, set_current_user
+
+        district_code = self._normalize_district_code(district_code)
+        if not district_code:
+            raise ValueError('district_code is required')
+
+        set_current_user(self.user)
+        try:
+            return self._run(
+                district_code,
+                paa_name=paa_name,
+                region_code=region_code,
+                dry_run=dry_run,
+            )
+        finally:
+            clear_current_user()
+
+    def _run(self, district_code, *, paa_name, region_code, dry_run):
+        from legacy_individual.adapters.pssn_api_adapter import LegacyPssnApiAdapter
+        from legacy_individual.sources.pssn_api_source import LegacyPssnApiSource
+        from legacy_individual.workflows.pssn_legacy_upload import (
+            process_legacy_pssn_frames,
+        )
+
+        strategy = str(
+            getattr(LegacyIndividualConfig, 'legacy_api_reimport_strategy', 'replace')
+            or 'replace'
+        ).lower()
+
+        prior_batches = list(
+            LegacyImportBatch.objects.filter(
+                source_system=self.SOURCE_SYSTEM,
+                code=district_code,
+                is_deleted=False,
+            )
+        )
+        prior_completed = [b for b in prior_batches if b.status in self._COMPLETED_STATUSES]
+        if strategy == 'fail' and prior_completed and not dry_run:
+            raise ValueError(
+                f"District {district_code} has already been imported via the API "
+                f"(batch {prior_completed[0].id}). Re-run with the 'replace' "
+                f"strategy to supersede it."
+            )
+
+        source = LegacyPssnApiSource()
+        raw_rows = list(source.pull(district_code))
+
+        batch = LegacyImportBatch(
+            code=district_code,
+            source_system=self.SOURCE_SYSTEM,
+            status=LegacyImportBatch.Status.PENDING,
+            json_ext={
+                'source': self.SOURCE_SYSTEM,
+                'district_code': district_code,
+                'paa_name': paa_name,
+                'region_code': region_code,
+                'dry_run': bool(dry_run),
+                'api': {
+                    'endpoint': source.url,
+                    'raw_rows': len(raw_rows),
+                    'reimport_strategy': strategy,
+                },
+            },
+        )
+        batch.save(user=self.user)
+
+        if (
+            getattr(LegacyIndividualConfig, 'legacy_api_preserve_raw_json', True)
+            and raw_rows
+        ):
+            try:
+                path = self._preserve_raw(batch, raw_rows)
+                batch.json_ext = {
+                    **(batch.json_ext or {}),
+                    'files': {'api_payload': {'path': path, 'row_count': len(raw_rows)}},
+                }
+                batch.save(user=self.user)
+            except Exception:
+                logger.exception('Legacy API import — failed to preserve raw JSON (continuing)')
+
+        if not raw_rows:
+            batch.status = LegacyImportBatch.Status.SUCCESS
+            batch.finished_at = timezone.now()
+            batch.save(user=self.user)
+            return self._result(batch, district_code, raw_rows, None, [], dry_run)
+
+        household_df, member_df = LegacyPssnApiAdapter().split(raw_rows)
+
+        if dry_run:
+            batch.total_households = len(household_df)
+            batch.total_members = len(member_df)
+            batch.status = LegacyImportBatch.Status.SUCCESS
+            batch.finished_at = timezone.now()
+            batch.save(user=self.user)
+            return self._result(batch, district_code, raw_rows, None, [], dry_run)
+
+        replaced_ids = []
+        if strategy == 'replace':
+            replaced_ids = self._supersede_prior(prior_batches, batch)
+            if replaced_ids:
+                batch.json_ext = {**(batch.json_ext or {}), 'replaces': replaced_ids}
+                batch.save(user=self.user)
+
+        stats = process_legacy_pssn_frames(self.user, batch, household_df, member_df)
+        return self._result(batch, district_code, raw_rows, stats, replaced_ids, dry_run)
+
+    @staticmethod
+    def _normalize_district_code(code) -> str:
+        c = (code or '').strip()
+        if c.isdigit() and len(c) < 4:
+            return c.zfill(4)
+        return c
+
+    def _preserve_raw(self, batch: LegacyImportBatch, raw_rows) -> str:
+        _ensure_upload_dir()
+        batch_dir = os.path.join(_LEGACY_UPLOAD_DIR, str(batch.id))
+        os.makedirs(batch_dir, exist_ok=True)
+        path = os.path.join(batch_dir, 'api_payload.json')
+        with open(path, 'w', encoding='utf-8') as fh:
+            json.dump(raw_rows, fh, ensure_ascii=False)
+        return path
+
+    def _supersede_prior(self, prior_batches, new_batch):
+        prior = [b for b in prior_batches if b.id != new_batch.id]
+        if not prior:
+            return []
+        batch_ids = [b.id for b in prior]
+
+        group_ids = list(
+            LegacyGroup.objects.filter(
+                import_batch_id__in=batch_ids, is_deleted=False
+            ).values_list('id', flat=True)
+        )
+        if group_ids:
+            LegacyGroupIndividual.objects.filter(
+                group_id__in=group_ids, is_deleted=False
+            ).update(is_deleted=True)
+        LegacyGroup.objects.filter(
+            import_batch_id__in=batch_ids, is_deleted=False
+        ).update(is_deleted=True)
+        LegacyIndividual.objects.filter(
+            import_batch_id__in=batch_ids, is_deleted=False
+        ).update(is_deleted=True)
+
+        superseded_at = timezone.now().isoformat()
+        for b in prior:
+            b.json_ext = {
+                **(b.json_ext or {}),
+                'superseded_by': str(new_batch.id),
+                'superseded_at': superseded_at,
+            }
+            b.save(user=self.user)
+
+        logger.info(
+            "Legacy API import: superseded %s prior batch(es) for district %s",
+            len(prior),
+            new_batch.code,
+        )
+        return [str(b.id) for b in prior]
+
+    @staticmethod
+    def _result(batch, district_code, raw_rows, stats, replaced_ids, dry_run):
+        return {
+            'batch_id': str(batch.id),
+            'batch_uuid': str(batch.id),
+            'status': batch.status,
+            'district_code': district_code,
+            'raw_rows': len(raw_rows),
+            'dry_run': bool(dry_run),
+            'replaces': replaced_ids,
+            'stats': stats or {
+                'total_households': batch.total_households,
+                'total_members': batch.total_members,
+                'success_household_count': batch.success_household_count,
+                'success_member_count': batch.success_member_count,
+                'warning_count': batch.warning_count,
+                'error_count': batch.error_count,
+                'errors': {},
+            },
+        }

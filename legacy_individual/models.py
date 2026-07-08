@@ -102,9 +102,9 @@ class LegacyIndividual(HistoryModel):
         related_name='legacy_individuals',
     )
 
-    first_name = models.CharField(max_length=255)
+    first_name = models.CharField(max_length=255, blank=True)
     middle_name = models.CharField(max_length=255, blank=True, null=True)
-    last_name = models.CharField(max_length=255)
+    last_name = models.CharField(max_length=255, blank=True)
     dob = core.fields.DateField(null=True, blank=True)
     gender = models.CharField(max_length=1, blank=True, null=True)
     disability = models.BooleanField(null=True, blank=True)

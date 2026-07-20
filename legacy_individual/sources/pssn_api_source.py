@@ -1,8 +1,3 @@
-"""HTTP source for the legacy PSSN ``combined_household_members.php`` endpoint.
-
-See docs/LEGACY_API_ETL_CODE_RATIONALE.md.
-"""
-
 from __future__ import annotations
 
 import logging

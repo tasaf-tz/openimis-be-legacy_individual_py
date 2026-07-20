@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "legacy_preserve_uploaded_file": True,
     "legacy_resolve_facility_against_tblhf": True,
 
-    # Legacy PSSN API pull — see docs/LEGACY_API_ETL_CODE_RATIONALE.md.
+    # Legacy PSSN API pull.
     "legacy_api_base_url": "",
     "legacy_api_path": "/livePSSN/api/etlapi/combined_household_members.php",
     "legacy_api_auth_type": "none",

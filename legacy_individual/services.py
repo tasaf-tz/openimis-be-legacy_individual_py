@@ -1,19 +1,3 @@
-"""
-Service layer for the legacy_individual module.
-
-Three classes:
-
-- ``PssnNormalizationService``  — pure helpers: name/date/code normalization,
-  gender/disability decoding, relationship-code → role mapping.
-- ``LegacyImportBatchService``  — creates a batch, persists the two PSSN
-  CSV files, kicks off the paired-upload workflow, finalizes the batch.
-- ``LegacyIndividualService`` / ``LegacyGroupService`` — read-mostly helpers
-  for the GraphQL layer.
-
-Important: this module never writes to ``individual_individual`` or
-``individual_group``. All writes target the legacy_individual_* tables.
-"""
-
 import json
 import logging
 import os
@@ -356,6 +340,46 @@ class LegacyApiImportService:
         finally:
             clear_current_user()
 
+    def precheck_reimport(self, district_code) -> Optional[str]:
+        district_code = self._normalize_district_code(district_code)
+        strategy = str(
+            getattr(LegacyIndividualConfig, 'legacy_api_reimport_strategy', 'replace')
+            or 'replace'
+        ).lower()
+        if strategy != 'fail':
+            return None
+        prior = (
+            LegacyImportBatch.objects
+            .filter(
+                source_system=self.SOURCE_SYSTEM,
+                code=district_code,
+                is_deleted=False,
+                status__in=self._COMPLETED_STATUSES,
+            )
+            .order_by('-date_created')
+            .first()
+        )
+        if prior is not None:
+            return (
+                f"District {district_code} has already been imported via the API "
+                f"(batch {prior.id}). Change the re-import strategy to 'replace' to "
+                f"supersede it, or delete the existing batch first."
+            )
+
+        cross_source_households = (
+            LegacyGroup.objects
+            .filter(code__startswith=district_code, is_deleted=False)
+            .exclude(import_batch__source_system=self.SOURCE_SYSTEM)
+            .count()
+        )
+        if cross_source_households:
+            return (
+                f"District {district_code} already has {cross_source_households} "
+                f"household(s) from a non-API import (e.g. a CSV upload). Change the "
+                f"re-import strategy to 'replace' to supersede them, or delete them first."
+            )
+        return None
+
     def _run(self, district_code, *, paa_name, region_code, dry_run):
         from legacy_individual.adapters.pssn_api_adapter import LegacyPssnApiAdapter
         from legacy_individual.sources.pssn_api_source import LegacyPssnApiSource
@@ -435,14 +459,22 @@ class LegacyApiImportService:
             batch.save(user=self.user)
             return self._result(batch, district_code, raw_rows, None, [], dry_run)
 
-        replaced_ids = []
-        if strategy == 'replace':
-            replaced_ids = self._supersede_prior(prior_batches, batch)
-            if replaced_ids:
-                batch.json_ext = {**(batch.json_ext or {}), 'replaces': replaced_ids}
-                batch.save(user=self.user)
+        replaced_holder = {'ids': []}
 
-        stats = process_legacy_pssn_frames(self.user, batch, household_df, member_df)
+        def _supersede_hook():
+            replaced_holder['ids'] = self._supersede_prior(prior_batches, batch, district_code)
+
+        stats = process_legacy_pssn_frames(
+            self.user, batch, household_df, member_df,
+            pre_import=_supersede_hook if strategy == 'replace' else None,
+        )
+
+        committed = batch.status in self._COMPLETED_STATUSES
+        replaced_ids = replaced_holder['ids'] if committed else []
+        if replaced_ids:
+            batch.json_ext = {**(batch.json_ext or {}), 'replaces': replaced_ids}
+            batch.save(user=self.user)
+
         return self._result(batch, district_code, raw_rows, stats, replaced_ids, dry_run)
 
     @staticmethod
@@ -461,30 +493,32 @@ class LegacyApiImportService:
             json.dump(raw_rows, fh, ensure_ascii=False)
         return path
 
-    def _supersede_prior(self, prior_batches, new_batch):
-        prior = [b for b in prior_batches if b.id != new_batch.id]
-        if not prior:
-            return []
-        batch_ids = [b.id for b in prior]
-
-        group_ids = list(
-            LegacyGroup.objects.filter(
-                import_batch_id__in=batch_ids, is_deleted=False
-            ).values_list('id', flat=True)
+    def _supersede_prior(self, prior_batches, new_batch, district_code):
+        prior_group_ids = list(
+            LegacyGroup.objects
+            .filter(code__startswith=district_code, is_deleted=False)
+            .exclude(import_batch_id=new_batch.id)
+            .values_list('id', flat=True)
         )
-        if group_ids:
-            LegacyGroupIndividual.objects.filter(
-                group_id__in=group_ids, is_deleted=False
-            ).update(is_deleted=True)
-        LegacyGroup.objects.filter(
-            import_batch_id__in=batch_ids, is_deleted=False
-        ).update(is_deleted=True)
-        LegacyIndividual.objects.filter(
-            import_batch_id__in=batch_ids, is_deleted=False
-        ).update(is_deleted=True)
 
+        if prior_group_ids:
+            individual_ids = list(
+                LegacyGroupIndividual.objects
+                .filter(group_id__in=prior_group_ids, is_deleted=False)
+                .values_list('individual_id', flat=True)
+            )
+            LegacyGroupIndividual.objects.filter(
+                group_id__in=prior_group_ids, is_deleted=False
+            ).update(is_deleted=True)
+            LegacyGroup.objects.filter(id__in=prior_group_ids).update(is_deleted=True)
+            if individual_ids:
+                LegacyIndividual.objects.filter(
+                    id__in=individual_ids, is_deleted=False
+                ).update(is_deleted=True)
+
+        prior_api = [b for b in prior_batches if b.id != new_batch.id]
         superseded_at = timezone.now().isoformat()
-        for b in prior:
+        for b in prior_api:
             b.json_ext = {
                 **(b.json_ext or {}),
                 'superseded_by': str(new_batch.id),
@@ -493,11 +527,11 @@ class LegacyApiImportService:
             b.save(user=self.user)
 
         logger.info(
-            "Legacy API import: superseded %s prior batch(es) for district %s",
-            len(prior),
-            new_batch.code,
+            "Legacy API import: district %s re-import cleared %s prior household(s) "
+            "and superseded %s prior API batch(es)",
+            district_code, len(prior_group_ids), len(prior_api),
         )
-        return [str(b.id) for b in prior]
+        return [str(b.id) for b in prior_api]
 
     @staticmethod
     def _result(batch, district_code, raw_rows, stats, replaced_ids, dry_run):

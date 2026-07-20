@@ -17,7 +17,7 @@ The workflow only writes to ``legacy_individual_*`` tables. It never touches
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 from django.db import transaction
@@ -90,6 +90,7 @@ def process_legacy_pssn_frames(
     member_df: pd.DataFrame,
     *,
     service: Optional[LegacyImportBatchService] = None,
+    pre_import: Optional[Callable[[], None]] = None,
 ) -> Optional[Dict]:
     """Import a pre-loaded pair of PSSN frames. See docs/LEGACY_API_ETL_CODE_RATIONALE.md."""
     service = service or LegacyImportBatchService(user)
@@ -111,7 +112,14 @@ def process_legacy_pssn_frames(
 
     try:
         with transaction.atomic():
+            if pre_import is not None:
+                pre_import()
             stats = _import_paired(batch, household_df, member_df, user)
+            nothing_saved = not (
+                stats['success_household_count'] or stats['success_member_count']
+            )
+            if stats['error_count'] and nothing_saved:
+                transaction.set_rollback(True)
     except Exception as exc:
         logger.exception('Legacy PSSN import — fatal during import')
         service.fail(batch, 'Fatal error during import', {'error': str(exc)})

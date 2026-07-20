@@ -274,6 +274,132 @@ class LegacyApiImportServiceTest(TestCase):
         batch1 = LegacyImportBatch.objects.get(id=batch1_id)
         self.assertEqual(batch1.json_ext.get("superseded_by"), batch2_id)
 
+    def test_reimport_failure_preserves_prior_district(self):
+        """A re-import that dies mid-insert must roll back the supersede so the
+        district keeps its previously-imported data (not left empty)."""
+        from legacy_individual.models import (
+            LegacyGroup, LegacyImportBatch, LegacyIndividual,
+        )
+
+        result1 = self._run_import("0703", SAMPLE_ROWS, paa_name="TEST DC")
+        batch1_id = result1["batch_id"]
+        self.assertEqual(
+            LegacyGroup.objects.filter(import_batch_id=batch1_id, is_deleted=False).count(), 2,
+        )
+        self.assertEqual(
+            LegacyIndividual.objects.filter(import_batch_id=batch1_id, is_deleted=False).count(), 3,
+        )
+
+        # Force the second import to fail during the insert (after the supersede hook ran).
+        with mock.patch(
+            "legacy_individual.workflows.pssn_legacy_upload._import_paired",
+            side_effect=RuntimeError("boom"),
+        ):
+            result2 = self._run_import("0703", SAMPLE_ROWS, paa_name="TEST DC")
+
+        batch2 = LegacyImportBatch.objects.get(id=result2["batch_id"])
+        self.assertEqual(batch2.status, LegacyImportBatch.Status.FAIL)
+
+        # Prior batch data is still live and NOT marked superseded; no replaces recorded.
+        self.assertEqual(
+            LegacyGroup.objects.filter(import_batch_id=batch1_id, is_deleted=False).count(), 2,
+        )
+        self.assertEqual(
+            LegacyIndividual.objects.filter(import_batch_id=batch1_id, is_deleted=False).count(), 3,
+        )
+        batch1 = LegacyImportBatch.objects.get(id=batch1_id)
+        self.assertIsNone((batch1.json_ext or {}).get("superseded_by"))
+        self.assertEqual(result2.get("replaces"), [])
+
+    def test_reimport_supersedes_cross_source_csv(self):
+        """An API re-import of a district must also supersede a prior CSV (source
+        'PSSN') load of that district, so it doesn't collide on the global NIN index."""
+        from legacy_individual.models import (
+            LegacyGroup, LegacyGroupIndividual, LegacyImportBatch, LegacyIndividual,
+        )
+
+        # Simulate a prior CSV load of district 0703 whose member NIN matches the API
+        # sample (row 2 of SAMPLE_ROWS).
+        csv_batch = LegacyImportBatch(
+            code="MANUAL-CSV", source_system="PSSN",
+            status=LegacyImportBatch.Status.SUCCESS,
+        )
+        csv_batch.save(user=self.user)
+        csv_group = LegacyGroup(code="07030720127146", import_batch=csv_batch)
+        csv_group.save(user=self.user)
+        csv_indiv = LegacyIndividual(
+            legacy_code="07030720127146-1", import_batch=csv_batch,
+            first_name="OLD", last_name="RECORD", nin="19700101-11111-00001-11",
+        )
+        csv_indiv.save(user=self.user)
+        LegacyGroupIndividual(group=csv_group, individual=csv_indiv).save(user=self.user)
+
+        result = self._run_import("0703", SAMPLE_ROWS, paa_name="TEST DC")
+
+        batch = LegacyImportBatch.objects.get(id=result["batch_id"])
+        self.assertIn(batch.status, (
+            LegacyImportBatch.Status.SUCCESS,
+            LegacyImportBatch.Status.COMPLETED_WITH_ERRORS,
+        ))
+        # Prior CSV records are now soft-deleted (freeing the NIN)...
+        self.assertEqual(
+            LegacyGroup.objects.filter(id=csv_group.id, is_deleted=False).count(), 0,
+        )
+        self.assertEqual(
+            LegacyIndividual.objects.filter(id=csv_indiv.id, is_deleted=False).count(), 0,
+        )
+        # ...and the colliding NIN is now owned by exactly one active (new-batch) record.
+        self.assertEqual(
+            LegacyIndividual.objects.filter(
+                nin="19700101-11111-00001-11", is_deleted=False,
+                import_batch_id=result["batch_id"],
+            ).count(), 1,
+        )
+
+    def test_precheck_reimport_fail_strategy(self):
+        """precheck_reimport blocks a re-import only under the 'fail' strategy."""
+        from legacy_individual.apps import LegacyIndividualConfig
+        from legacy_individual.services import LegacyApiImportService
+
+        svc = LegacyApiImportService(self.user)
+        self.assertIsNone(svc.precheck_reimport("0703"))  # nothing imported yet
+
+        self._run_import("0703", SAMPLE_ROWS, paa_name="TEST DC")
+
+        # Default 'replace' strategy: re-import allowed.
+        self.assertIsNone(svc.precheck_reimport("0703"))
+        # 'fail' strategy: blocked with a message naming the district.
+        with mock.patch.object(
+            LegacyIndividualConfig, 'legacy_api_reimport_strategy', 'fail',
+        ):
+            msg = svc.precheck_reimport("0703")
+        self.assertIsNotNone(msg)
+        self.assertIn("0703", msg)
+
+    def test_precheck_reimport_fail_strategy_warns_on_csv(self):
+        """Under 'fail', a prior CSV (non-API) load of the district is also flagged."""
+        from legacy_individual.apps import LegacyIndividualConfig
+        from legacy_individual.models import LegacyGroup, LegacyImportBatch
+        from legacy_individual.services import LegacyApiImportService
+
+        csv_batch = LegacyImportBatch(
+            code="MANUAL-CSV", source_system="PSSN",
+            status=LegacyImportBatch.Status.SUCCESS,
+        )
+        csv_batch.save(user=self.user)
+        LegacyGroup(code="07030720127146", import_batch=csv_batch).save(user=self.user)
+
+        svc = LegacyApiImportService(self.user)
+        # Default 'replace' will supersede the CSV, so it is allowed.
+        self.assertIsNone(svc.precheck_reimport("0703"))
+        # Under 'fail', the non-API records are surfaced.
+        with mock.patch.object(
+            LegacyIndividualConfig, 'legacy_api_reimport_strategy', 'fail',
+        ):
+            msg = svc.precheck_reimport("0703")
+        self.assertIsNotNone(msg)
+        self.assertIn("non-API", msg)
+
     def test_empty_district_is_empty_success(self):
         from legacy_individual.models import LegacyImportBatch
 

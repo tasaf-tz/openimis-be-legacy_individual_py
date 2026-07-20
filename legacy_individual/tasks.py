@@ -1,8 +1,3 @@
-"""Celery task for the legacy PSSN API import.
-
-See docs/LEGACY_API_ETL_CODE_RATIONALE.md.
-"""
-
 import logging
 
 from celery import shared_task

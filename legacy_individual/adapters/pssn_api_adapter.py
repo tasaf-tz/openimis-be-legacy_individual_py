@@ -1,8 +1,3 @@
-"""Legacy PSSN API rows -> (household_df, member_df) for ``_import_paired``.
-
-See docs/LEGACY_API_ETL_CODE_RATIONALE.md.
-"""
-
 from __future__ import annotations
 
 import logging

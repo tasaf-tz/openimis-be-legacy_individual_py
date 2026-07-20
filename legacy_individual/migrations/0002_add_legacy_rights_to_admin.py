@@ -1,7 +1,5 @@
 from django.db import migrations
 
-# Permission codes reserved for the legacy_individual module (see apps.py).
-# Mirrors openimis-be-individual_py/individual/migrations/0002_add_individual_rigts_for_admin.py
 legacy_individual_rights = [
     200001, 200002, 200003, 200004,   # legacy individual: search / create / update / delete
     200011, 200012, 200013, 200014,   # legacy group: search / create / update / delete
@@ -33,8 +31,6 @@ def remove_rights(apps, schema_editor):
 
 
 def _clear_cache():
-    # apps.get_model() bypasses ORM signals in a migration, so the cached
-    # user-rights set won't be invalidated automatically.
     try:
         from django.core.cache import cache
         cache.clear()

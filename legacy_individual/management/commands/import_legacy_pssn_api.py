@@ -1,8 +1,3 @@
-"""Import one district from the legacy PSSN API (synchronous).
-
-See docs/LEGACY_API_ETL_CODE_RATIONALE.md.
-"""
-
 import json
 
 from django.core.management.base import BaseCommand, CommandError

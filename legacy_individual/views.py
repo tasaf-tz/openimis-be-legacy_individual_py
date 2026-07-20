@@ -1,15 +1,3 @@
-"""
-REST endpoints for the legacy_individual module.
-
-Single endpoint for MVP:
-
-- POST ``/legacy_individual/import_pssn/`` — multipart upload of the two
-  PSSN CSVs (``household_file`` + ``member_file``). Creates a
-  ``LegacyImportBatch``, persists both files, and runs the paired-upload
-  workflow synchronously (mirrors the live ``individual.import_individuals``
-  pattern).
-"""
-
 import logging
 import os
 import threading
@@ -120,6 +108,27 @@ def import_pssn_api(request):
         )
 
     user = request.user
+
+    if dry_run:
+        try:
+            result = LegacyApiImportService(user).run(
+                district_code, paa_name=paa_name, region_code=region_code, dry_run=True,
+            )
+            return Response({'success': True, 'data': {**result, 'mode': 'sync'}})
+        except Exception as exc:
+            logger.exception('Legacy PSSN API dry run failed (district=%s)', district_code)
+            return Response(
+                {'success': False, 'error': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    reimport_error = LegacyApiImportService(user).precheck_reimport(district_code)
+    if reimport_error:
+        return Response(
+            {'success': False, 'error': reimport_error},
+            status=status.HTTP_409_CONFLICT,
+        )
+
     mode = 'thread'
 
     if getattr(LegacyIndividualConfig, 'legacy_api_use_celery', True):

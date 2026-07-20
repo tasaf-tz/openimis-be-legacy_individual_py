@@ -1,5 +1,3 @@
-"""GraphQL schema entrypoint for the legacy_individual module."""
-
 import graphene
 import graphene_django_optimizer as gql_optimizer
 

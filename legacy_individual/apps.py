@@ -9,17 +9,17 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_CONFIG = {
-    "gql_legacy_individual_search_perms": ["200001"],
-    "gql_legacy_individual_create_perms": ["200002"],
-    "gql_legacy_individual_update_perms": ["200003"],
-    "gql_legacy_individual_delete_perms": ["200004"],
-    "gql_legacy_group_search_perms": ["200011"],
-    "gql_legacy_group_create_perms": ["200012"],
-    "gql_legacy_group_update_perms": ["200013"],
-    "gql_legacy_group_delete_perms": ["200014"],
-    "gql_legacy_import_execute_perms": ["200021"],
-    "gql_legacy_match_review_perms": ["200031"],
-    "gql_legacy_promotion_execute_perms": ["200041"],
+    "gql_legacy_individual_search_perms": ["260001"],
+    "gql_legacy_individual_create_perms": ["260002"],
+    "gql_legacy_individual_update_perms": ["260003"],
+    "gql_legacy_individual_delete_perms": ["260004"],
+    "gql_legacy_group_search_perms": ["260011"],
+    "gql_legacy_group_create_perms": ["260012"],
+    "gql_legacy_group_update_perms": ["260013"],
+    "gql_legacy_group_delete_perms": ["260014"],
+    "gql_legacy_import_execute_perms": ["260021"],
+    "gql_legacy_match_review_perms": ["260031"],
+    "gql_legacy_promotion_execute_perms": ["260041"],
 
     "legacy_read_only_default": True,
     "legacy_preserve_uploaded_file": True,

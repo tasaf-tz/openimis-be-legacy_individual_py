@@ -135,6 +135,7 @@ class LegacyIndividual(HistoryModel):
         indexes = [
             models.Index(fields=['legacy_code']),
             models.Index(fields=['premno']),
+            models.Index(fields=['first_name'], name='legacy_ind_first_n_idx'),
             models.Index(fields=['last_name']),
             models.Index(fields=['dob']),
             models.Index(fields=['location']),

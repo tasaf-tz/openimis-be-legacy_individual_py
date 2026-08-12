@@ -31,6 +31,19 @@ class LegacyImportBatch(HistoryModel):
     started_at = core.fields.DateTimeField(null=True, blank=True)
     finished_at = core.fields.DateTimeField(null=True, blank=True)
 
+    # An import covers exactly one district, so the scope is denormalised here rather than
+    # derived from the imported rows -- filtering the batch list must not scan
+    # LegacyIndividual. Nullable: batches predating this, and uploads whose district cannot
+    # be resolved, keep NULL and are handled by backfill_batch_locations.
+    region = models.ForeignKey(
+        Location, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='legacy_import_batches_region',
+    )
+    district = models.ForeignKey(
+        Location, on_delete=models.DO_NOTHING, null=True, blank=True,
+        related_name='legacy_import_batches_district',
+    )
+
     total_households = models.IntegerField(default=0)
     total_members = models.IntegerField(default=0)
     success_household_count = models.IntegerField(default=0)
@@ -49,6 +62,8 @@ class LegacyImportBatch(HistoryModel):
             models.Index(fields=['status']),
             models.Index(fields=['source_system']),
             models.Index(fields=['date_created']),
+            models.Index(fields=['district']),
+            models.Index(fields=['region']),
         ]
 
 

@@ -51,6 +51,8 @@ class Query(graphene.ObjectType):
     legacy_import_batches = OrderedDjangoFilterConnectionField(
         LegacyImportBatchGQLType,
         orderBy=graphene.List(of_type=graphene.String),
+        parent_location=graphene.String(),
+        parent_location_level=graphene.Int(),
     )
 
     # ---- resolvers ----
@@ -76,9 +78,10 @@ class Query(graphene.ObjectType):
 
     def resolve_legacy_import_batches(self, info, **kwargs):
         Query._check_search_perm(info, LegacyIndividualConfig.gql_legacy_individual_search_perms)
-        return gql_optimizer.query(
-            LegacyImportBatch.objects.filter(is_deleted=False), info,
+        qs = LegacyImportBatch.objects.filter(
+            is_deleted=False, *Query._batch_scope_filters(kwargs)
         )
+        return gql_optimizer.query(qs, info)
 
     @staticmethod
     def _scope_filters(kwargs):
@@ -101,6 +104,37 @@ class Query(graphene.ObjectType):
         if import_batch_id:
             filters.append(Q(import_batch__id=import_batch_id))
         return filters
+
+    @staticmethod
+    def _batch_scope_filters(kwargs):
+        """Location scoping for batches, which carry district/region directly.
+
+        A batch IS one district, so the selected location is resolved to the district it
+        belongs to and matched against that column -- an indexed FK compare, no join into
+        LegacyIndividual.
+        """
+        from location.models import Location
+
+        parent_location = kwargs.get("parent_location")
+        if not parent_location:
+            return []
+
+        loc = Location.objects.filter(
+            uuid=parent_location, validity_to__isnull=True).select_related(
+            'parent', 'parent__parent').first()
+        if loc is None:
+            return []
+
+        if loc.type == 'R':
+            return [Q(region=loc) | Q(district__parent=loc)]
+
+        node, hops = loc, 0
+        while node is not None and node.type != 'D' and hops < 5:
+            node = node.parent
+            hops += 1
+        if node is None or node.type != 'D':
+            return []
+        return [Q(district=node)]
 
     @staticmethod
     def _check_search_perm(info, perm):

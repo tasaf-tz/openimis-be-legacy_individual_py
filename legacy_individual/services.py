@@ -207,12 +207,17 @@ class LegacyImportBatchService:
 
     @transaction.atomic
     def create_from_files(self, household_file, member_file, code: Optional[str] = None) -> LegacyImportBatch:
+        # An upload names its district in `code` when the operator supplies one; otherwise the
+        # scope is derived from the imported rows afterwards (backfill_batch_locations).
+        scope_district, scope_region = LegacyApiImportService.resolve_scope(code)
         batch = LegacyImportBatch(
             code=code or '',
             source_system='PSSN',
             household_file_name=os.path.basename(household_file.name),
             member_file_name=os.path.basename(member_file.name),
             status=LegacyImportBatch.Status.PENDING,
+            district=scope_district,
+            region=scope_region,
             json_ext={},
         )
         batch.save(user=self.user)
@@ -410,10 +415,13 @@ class LegacyApiImportService:
         source = LegacyPssnApiSource()
         raw_rows = list(source.pull(district_code))
 
+        scope_district, scope_region = self.resolve_scope(district_code, region_code)
         batch = LegacyImportBatch(
             code=district_code,
             source_system=self.SOURCE_SYSTEM,
             status=LegacyImportBatch.Status.PENDING,
+            district=scope_district,
+            region=scope_region,
             json_ext={
                 'source': self.SOURCE_SYSTEM,
                 'district_code': district_code,
@@ -483,6 +491,21 @@ class LegacyApiImportService:
         if c.isdigit() and len(c) < 4:
             return c.zfill(4)
         return c
+
+    @staticmethod
+    def resolve_scope(district_code=None, region_code=None):
+        """District code -> (district Location, region Location). Either may be None."""
+        from location.models import Location
+        district = region = None
+        if district_code:
+            district = Location.objects.filter(
+                code=district_code, type='D', validity_to__isnull=True).first()
+        if district is not None:
+            region = district.parent
+        elif region_code:
+            region = Location.objects.filter(
+                code=region_code, type='R', validity_to__isnull=True).first()
+        return district, region
 
     def _preserve_raw(self, batch: LegacyImportBatch, raw_rows) -> str:
         _ensure_upload_dir()

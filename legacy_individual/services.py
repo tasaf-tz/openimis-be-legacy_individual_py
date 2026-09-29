@@ -11,6 +11,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from individual.relationship_roles import role_for_relationship
 from legacy_individual.apps import LegacyIndividualConfig
 from legacy_individual.models import (
     LegacyGroup,
@@ -124,48 +125,10 @@ class PssnNormalizationService:
     def map_relationship_to_role(rel_code, gender) -> Optional[str]:
         """
         Map ``RELATIONSHIPTOHEAD`` + ``SEX`` to the openIMIS role label.
-        Source table: docs/legacy-individual-module/07_PSSN_COLUMN_MAPPING.md §6.
+        The shared code table lives in individual.relationship_roles.
         """
-        if rel_code is None:
-            return None
-        code = str(rel_code).strip()
-        if not code:
-            return None
-
-        g = (gender or '').strip().upper()
-        Role = LegacyGroupIndividual.Role
-
-        if code == '1':
-            return Role.HEAD
-        if code in ('2', '12'):
-            return Role.SPOUSE
-        if code in ('3', '4'):
-            if g == 'M':
-                return Role.SON
-            if g == 'F':
-                return Role.DAUGHTER
-            return Role.OTHER_RELATIVE
-        if code == '5':
-            if g == 'M':
-                return Role.BROTHER
-            if g == 'F':
-                return Role.SISTER
-            return Role.OTHER_RELATIVE
-        if code == '6':
-            if g == 'M':
-                return Role.GRANDSON
-            if g == 'F':
-                return Role.GRANDDAUGHTER
-            return Role.OTHER_RELATIVE
-        if code == '7':
-            if g == 'M':
-                return Role.FATHER
-            if g == 'F':
-                return Role.MOTHER
-            return Role.OTHER_RELATIVE
-        if code == '14':
-            return Role.NOT_RELATED
-        return Role.OTHER_RELATIVE
+        role = role_for_relationship(rel_code, gender)
+        return LegacyGroupIndividual.Role(role) if role else None
 
     @staticmethod
     def derive_legacy_code(registration_no, member_line_no) -> Optional[str]:

@@ -11,6 +11,9 @@ from legacy_individual.models import (
     LegacyGroupIndividual,
     LegacyImportBatch,
     LegacyIndividual,
+    Rm4Group,
+    Rm4GroupIndividual,
+    Rm4Individual,
 )
 
 
@@ -91,5 +94,50 @@ class LegacyGroupIndividualGQLType(DjangoObjectType):
             'recipient_type': ['exact'],
             'member_line': ['exact'],
             'is_deleted': ['exact'],
+        }
+        connection_class = ExtendedConnection
+
+
+class Rm4GroupGQLType(DjangoObjectType):
+    uuid = graphene.String(source='uuid')
+
+    class Meta:
+        model = Rm4Group
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'id': ['exact'],
+            'code': ['iexact', 'istartswith', 'icontains'],
+            'date_created': ['exact', 'lt', 'lte', 'gt', 'gte'],
+        }
+        connection_class = ExtendedConnection
+
+
+class Rm4IndividualGQLType(DjangoObjectType):
+    uuid = graphene.String(source='uuid')
+
+    class Meta:
+        model = Rm4Individual
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'id': ['exact'],
+            'first_name': ['iexact', 'istartswith', 'icontains'],
+            'last_name': ['iexact', 'istartswith', 'icontains'],
+            'dob': ['exact', 'lt', 'lte', 'gt', 'gte'],
+            'date_created': ['exact', 'lt', 'lte', 'gt', 'gte'],
+        }
+        connection_class = ExtendedConnection
+
+
+class Rm4GroupIndividualGQLType(DjangoObjectType):
+    uuid = graphene.String(source='uuid')
+
+    class Meta:
+        model = Rm4GroupIndividual
+        interfaces = (graphene.relay.Node,)
+        filter_fields = {
+            'id': ['exact'],
+            'group__id': ['exact'],
+            'individual__id': ['exact'],
+            'role': ['exact'],
         }
         connection_class = ExtendedConnection

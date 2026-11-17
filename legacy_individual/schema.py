@@ -1,6 +1,8 @@
 import graphene
 import graphene_django_optimizer as gql_optimizer
 from django.db.models import Q
+from django.db.models.fields.json import KeyTextTransform
+from django.db.models.functions import Upper
 
 from core.schema import OrderedDjangoFilterConnectionField
 from location.apps import LocationConfig
@@ -12,6 +14,9 @@ from legacy_individual.gql_queries import (
     LegacyGroupIndividualGQLType,
     LegacyImportBatchGQLType,
     LegacyIndividualGQLType,
+    Rm4GroupGQLType,
+    Rm4GroupIndividualGQLType,
+    Rm4IndividualGQLType,
     _have_permissions,
 )
 from legacy_individual.models import (
@@ -19,6 +24,9 @@ from legacy_individual.models import (
     LegacyGroupIndividual,
     LegacyImportBatch,
     LegacyIndividual,
+    Rm4Group,
+    Rm4GroupIndividual,
+    Rm4Individual,
 )
 
 
@@ -55,6 +63,29 @@ class Query(graphene.ObjectType):
         parent_location_level=graphene.Int(),
     )
 
+    rm4_groups = OrderedDjangoFilterConnectionField(
+        Rm4GroupGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        parent_location=graphene.String(),
+        parent_location_level=graphene.Int(),
+        archive_batch_id=graphene.String(),
+        interview_key=graphene.String(),
+        pmt_class=graphene.String(),
+    )
+    rm4_individuals = OrderedDjangoFilterConnectionField(
+        Rm4IndividualGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+        parent_location=graphene.String(),
+        parent_location_level=graphene.Int(),
+        archive_batch_id=graphene.String(),
+        external_id=graphene.String(),
+        group_code=graphene.String(),
+    )
+    rm4_group_individuals = OrderedDjangoFilterConnectionField(
+        Rm4GroupIndividualGQLType,
+        orderBy=graphene.List(of_type=graphene.String),
+    )
+
     # ---- resolvers ----
     def resolve_legacy_individuals(self, info, **kwargs):
         Query._check_search_perm(info, LegacyIndividualConfig.gql_legacy_individual_search_perms)
@@ -82,6 +113,41 @@ class Query(graphene.ObjectType):
             is_deleted=False, *Query._batch_scope_filters(kwargs)
         )
         return gql_optimizer.query(qs, info)
+
+    def resolve_rm4_groups(self, info, **kwargs):
+        Query._check_search_perm(info, LegacyIndividualConfig.gql_rm4_group_search_perms)
+        qs = Query._rm4_queryset(Rm4Group, info, kwargs)
+        if kwargs.get('interview_key'):
+            qs = qs.annotate(_interview_key=KeyTextTransform('interview_key', 'json_ext')).filter(
+                _interview_key=kwargs['interview_key'])
+        if kwargs.get('pmt_class'):
+            qs = qs.annotate(_pmt_class=KeyTextTransform('pmt_class_household', 'json_ext')).filter(
+                _pmt_class=kwargs['pmt_class'])
+        return gql_optimizer.query(qs, info)
+
+    def resolve_rm4_individuals(self, info, **kwargs):
+        Query._check_search_perm(info, LegacyIndividualConfig.gql_rm4_individual_search_perms)
+        qs = Query._rm4_queryset(Rm4Individual, info, kwargs)
+        if kwargs.get('external_id'):
+            qs = qs.annotate(_external_id=Upper(KeyTextTransform('external_id', 'json_ext'))).filter(
+                _external_id__startswith=kwargs['external_id'].upper())
+        if kwargs.get('group_code'):
+            qs = qs.filter(memberships__group__code__istartswith=kwargs['group_code']).distinct()
+        return gql_optimizer.query(qs, info)
+
+    def resolve_rm4_group_individuals(self, info, **kwargs):
+        Query._check_search_perm(info, LegacyIndividualConfig.gql_rm4_group_search_perms)
+        qs = Rm4GroupIndividual.get_queryset(None, info.context.user).filter(is_deleted=False)
+        return gql_optimizer.query(qs, info)
+
+    @staticmethod
+    def _rm4_queryset(model, info, kwargs):
+        """Archive rows the user's districts allow, filtered by location and archive batch."""
+        qs = model.get_queryset(None, info.context.user).filter(
+            is_deleted=False, *Query._scope_filters(kwargs))
+        if kwargs.get('archive_batch_id'):
+            qs = qs.filter(archive_batch__id=kwargs['archive_batch_id'])
+        return qs
 
     @staticmethod
     def _scope_filters(kwargs):

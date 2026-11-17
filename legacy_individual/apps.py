@@ -20,6 +20,8 @@ DEFAULT_CONFIG = {
     "gql_legacy_import_execute_perms": ["260021"],
     "gql_legacy_match_review_perms": ["260031"],
     "gql_legacy_promotion_execute_perms": ["260041"],
+    "gql_rm4_individual_search_perms": ["260051"],
+    "gql_rm4_group_search_perms": ["260061"],
 
     "legacy_read_only_default": True,
     "legacy_preserve_uploaded_file": True,
@@ -61,6 +63,8 @@ class LegacyIndividualConfig(AppConfig):
     gql_legacy_import_execute_perms = None
     gql_legacy_match_review_perms = None
     gql_legacy_promotion_execute_perms = None
+    gql_rm4_individual_search_perms = None
+    gql_rm4_group_search_perms = None
 
     legacy_read_only_default = None
     legacy_preserve_uploaded_file = None
